@@ -1,0 +1,119 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command:
+      - gcloud
+      - beta
+      - emulators
+      - pubsub
+      - start
+      - --project=local-project
+      - --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8085'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  pubsub-init:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    environment:
+      PROJECT_ID: local-project
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+      EVENTS_TOPIC: events
+      EVENTS_SUBSCRIPTION: events-sub
+      DLQ_TOPIC: events-dlq
+      DLQ_SUBSCRIPTION: events-dlq-sub
+    volumes:
+      - ./pubsub/init.sh:/init.sh:ro
+    entrypoint: ["/bin/bash", "/init.sh"]
+    depends_on:
+      pubsub:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ./api
+    environment:
+      PROJECT_ID: local-project
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+      EVENTS_TOPIC: events
+    ports:
+      - "8000:8000"
+    depends_on:
+      pubsub-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bun -e \"const response = await fetch('http://localhost:8000/health'); if (!response.ok) process.exit(1)\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  dataflow:
+    build:
+      context: ./dataflow
+      args:
+        DATAFLOW_TEMPLATES_REF: 2026-05-26-00_RC00
+    environment:
+      PROJECT_ID: local-project
+      PUBSUB_ROOT_URL: http://pubsub:8085
+      INPUT_SUBSCRIPTION: projects/local-project/subscriptions/events-sub
+      DEAD_LETTER_TOPIC: projects/local-project/topics/events-dlq
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: default
+      CLICKHOUSE_TABLE: events
+      CLICKHOUSE_USERNAME: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEAD_LETTER_TABLE: events_dead_letter
+      WINDOW_SECONDS: "5"
+      BATCH_ROW_COUNT: "10"
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      pubsub-init:
+        condition: service_completed_successfully
+
+  k6:
+    image: grafana/k6:2.0.0
+    profiles:
+      - load
+    environment:
+      API_URL: http://api:8000/events
+      K6_VUS: "5"
+      K6_DURATION: 30s
+      K6_SLEEP: "1"
+    volumes:
+      - ./k6:/scripts:ro
+    command: ["run", "/scripts/load.js"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:

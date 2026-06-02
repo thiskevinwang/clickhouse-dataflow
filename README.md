@@ -4,58 +4,41 @@
 
 This project runs a local Pub/Sub to ClickHouse ingestion stack with Docker Compose:
 
-- FastAPI event producer
+- Bun/Hono API event producer
 - GCP Pub/Sub emulator
 - Local Apache Beam `DirectRunner` execution of the upstream `PubSubToClickHouse` template
 - ClickHouse
-- k6 load generator
+- Load generator
 
 ## Run
 
-```sh
-docker compose up --build
-```
+Use `make help` to list available targets.
 
-Publish one event:
+- `make config` validates the Compose configuration.
+- `make build` builds the local API and Dataflow images.
+- `make up` builds and runs the full stack in the foreground.
+- `make start` builds and runs the full stack in the background.
+- `make ps` shows service status.
+- `make logs` shows recent Compose logs.
+- `make down` stops and removes Compose containers.
 
-```sh
-curl -X POST http://localhost:8000/events
-```
+## API
 
-Publish a manual burst:
+- `make health` calls the API health endpoint.
+- `make event` publishes one generated event.
+- `make batch COUNT=20` publishes a generated event batch.
 
-```sh
-curl -X POST 'http://localhost:8000/events/batch?count=20'
-```
+## ClickHouse
 
-Query ClickHouse:
+- `make count` counts ingested events.
+- `make sample` shows recent ingested events.
 
-```sh
-docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM events"
-docker compose exec clickhouse clickhouse-client --query "SELECT * FROM events ORDER BY occurred_at DESC LIMIT 5 FORMAT Vertical"
-```
+## Load Test
 
-Run the k6 load generator:
+- `make load` runs k6 with the default settings.
+- `make load K6_VUS=20 K6_DURATION=1m K6_SLEEP=0.2` overrides the default k6 settings.
 
-```sh
-docker compose --profile load run --rm k6
-```
+## Dead Letter
 
-Override the default k6 settings:
-
-```sh
-K6_VUS=20 K6_DURATION=1m K6_SLEEP=0.2 docker compose --profile load run --rm k6
-```
-
-Publish a malformed message to exercise dead-letter handling:
-
-```sh
-docker compose exec pubsub env PUBSUB_EMULATOR_HOST=localhost:8085 \
-  gcloud pubsub topics publish events --message='not valid json' --project=local-project
-```
-
-Check the ClickHouse dead-letter table:
-
-```sh
-docker compose exec clickhouse clickhouse-client --query "SELECT raw_message, error_message, failed_at FROM events_dead_letter ORDER BY failed_at DESC LIMIT 5 FORMAT Vertical"
-```
+- `make malformed` publishes a malformed Pub/Sub message.
+- `make dead-letter` shows recent ClickHouse dead-letter rows.
