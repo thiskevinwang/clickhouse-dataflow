@@ -9,6 +9,7 @@ type EventObject = {
   amount: number;
   quantity: number;
   source: string;
+  payload: Record<string, unknown>;
 };
 
 type PublishResponse = {
@@ -33,6 +34,7 @@ const eventTypes = [
 const sources = ["web", "mobile", "partner", "internal"] as const;
 
 const app = new Hono();
+const byteToHex = Array.from({ length: 256 }, (_, index) => index.toString(16).padStart(2, "0"));
 
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -46,16 +48,95 @@ function occurredAt(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+function uuidV7(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const timestamp = BigInt(Date.now());
+
+  bytes[0] = Number((timestamp >> 40n) & 0xffn);
+  bytes[1] = Number((timestamp >> 32n) & 0xffn);
+  bytes[2] = Number((timestamp >> 24n) & 0xffn);
+  bytes[3] = Number((timestamp >> 16n) & 0xffn);
+  bytes[4] = Number((timestamp >> 8n) & 0xffn);
+  bytes[5] = Number(timestamp & 0xffn);
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  return (
+    byteToHex[bytes[0]] +
+    byteToHex[bytes[1]] +
+    byteToHex[bytes[2]] +
+    byteToHex[bytes[3]] +
+    "-" +
+    byteToHex[bytes[4]] +
+    byteToHex[bytes[5]] +
+    "-" +
+    byteToHex[bytes[6]] +
+    byteToHex[bytes[7]] +
+    "-" +
+    byteToHex[bytes[8]] +
+    byteToHex[bytes[9]] +
+    "-" +
+    byteToHex[bytes[10]] +
+    byteToHex[bytes[11]] +
+    byteToHex[bytes[12]] +
+    byteToHex[bytes[13]] +
+    byteToHex[bytes[14]] +
+    byteToHex[bytes[15]]
+  );
+}
+
+function generatePayload(eventType: (typeof eventTypes)[number]): Record<string, unknown> {
+  const common = {
+    app_version: `${randomInt(1, 4)}.${randomInt(0, 9)}.${randomInt(0, 9)}`,
+    experiment: randomChoice(["control", "checkout-redesign", "pricing-copy"]),
+    flags: {
+      beta_user: Math.random() > 0.75,
+      campaign_id: `cmp-${randomInt(100, 999)}`,
+    },
+  };
+
+  switch (eventType) {
+    case "page_view":
+      return {
+        ...common,
+        page: randomChoice(["/", "/pricing", "/docs", "/checkout"]),
+        referrer: randomChoice(["direct", "search", "newsletter", "partner"]),
+      };
+    case "purchase":
+      return {
+        ...common,
+        payment_method: randomChoice(["card", "ach", "wallet"]),
+        currency: "USD",
+        coupon_codes: Math.random() > 0.7 ? [`SAVE${randomInt(5, 30)}`] : [],
+      };
+    case "refund":
+      return {
+        ...common,
+        reason: randomChoice(["duplicate", "customer_request", "fraud_review"]),
+        refunded_items: randomInt(1, 3),
+      };
+    default:
+      return {
+        ...common,
+        form_factor: randomChoice(["desktop", "tablet", "phone"]),
+        latency_ms: randomInt(20, 900),
+      };
+  }
+}
+
 function generateEvent(): EventObject {
+  const eventType = randomChoice(eventTypes);
+
   return {
-    event_id: crypto.randomUUID(),
-    event_type: randomChoice(eventTypes),
+    event_id: uuidV7(),
+    event_type: eventType,
     user_id: `user-${randomInt(1, 5000)}`,
-    session_id: crypto.randomUUID(),
+    session_id: uuidV7(),
     occurred_at: occurredAt(),
     amount: Math.round((Math.random() * 499 + 1) * 100) / 100,
     quantity: randomInt(1, 12),
     source: randomChoice(sources),
+    payload: generatePayload(eventType),
   };
 }
 

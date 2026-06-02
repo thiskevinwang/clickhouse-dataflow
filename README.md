@@ -4,10 +4,10 @@
 
 This project runs a local Pub/Sub to ClickHouse ingestion stack with Docker Compose:
 
-- Bun/Hono API event producer
+- Bun/Hono API event producer with dynamic payload databags
 - GCP Pub/Sub emulator
 - Local Apache Beam `DirectRunner` execution of the upstream `PubSubToClickHouse` template
-- ClickHouse
+- ClickHouse with a native JSON payload column
 - Load generator
 
 ## Run

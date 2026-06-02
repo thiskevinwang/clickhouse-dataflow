@@ -60,7 +60,7 @@ count: ## Count ingested events in ClickHouse
 
 .PHONY: sample
 sample: ## Show recent ingested events in ClickHouse
-	$(COMPOSE) exec -T clickhouse clickhouse-client --query "SELECT * FROM events ORDER BY occurred_at DESC LIMIT 5 FORMAT Vertical"
+	$(COMPOSE) exec -T clickhouse clickhouse-client --query "SELECT event_id, event_type, source, occurred_at, payload FROM events ORDER BY occurred_at DESC LIMIT 5 FORMAT Vertical"
 
 .PHONY: load
 load: ## Run k6 against the API (K6_VUS=5 K6_DURATION=30s K6_SLEEP=1)

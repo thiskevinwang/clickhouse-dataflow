@@ -86,7 +86,7 @@ services:
       DEAD_LETTER_TOPIC: projects/local-project/topics/events-dlq
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DATABASE: default
-      CLICKHOUSE_TABLE: events
+      CLICKHOUSE_TABLE: events_ingest
       CLICKHOUSE_USERNAME: default
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEAD_LETTER_TABLE: events_dead_letter
