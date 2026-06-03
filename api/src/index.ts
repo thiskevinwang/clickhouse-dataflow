@@ -1,15 +1,40 @@
 import { Hono } from "hono";
 
-type EventObject = {
-  event_id: string;
-  event_type: string;
-  user_id: string;
-  session_id: string;
-  occurred_at: string;
-  amount: number;
-  quantity: number;
-  source: string;
-  payload: Record<string, unknown>;
+type AnyValue =
+  | { stringValue: string }
+  | { intValue: string }
+  | { doubleValue: number }
+  | { boolValue: boolean }
+  | { arrayValue: { values: AnyValue[] } }
+  | { kvlistValue: { values: KeyValue[] } };
+
+type KeyValue = {
+  key: string;
+  value: AnyValue;
+};
+
+type OtelEvent = {
+  timeUnixNano: string;
+  observedTimeUnixNano: string;
+  traceId: string;
+  spanId: string;
+  flags: number;
+  severityNumber: number;
+  severityText: string;
+  body: AnyValue;
+  resource: {
+    attributes: KeyValue[];
+    droppedAttributesCount: number;
+  };
+  instrumentationScope: {
+    name: string;
+    version: string;
+    attributes: KeyValue[];
+    droppedAttributesCount: number;
+  };
+  attributes: KeyValue[];
+  droppedAttributesCount: number;
+  eventName: string;
 };
 
 type PublishResponse = {
@@ -22,16 +47,18 @@ const pubsubEmulatorHost = Bun.env.PUBSUB_EMULATOR_HOST ?? "pubsub:8085";
 const topicPath = `projects/${projectId}/topics/${eventsTopic}`;
 const publishUrl = `http://${pubsubEmulatorHost}/v1/${topicPath}:publish`;
 
-const eventTypes = [
-  "page_view",
-  "signup",
-  "purchase",
-  "refund",
-  "cart_add",
-  "checkout_start",
+const eventTemplates = [
+  { name: "app.page.viewed", body: "Page viewed", severityNumber: 9, severityText: "INFO", weight: 42 },
+  { name: "app.cart.item_added", body: "Item added to cart", severityNumber: 9, severityText: "INFO", weight: 24 },
+  { name: "app.checkout.started", body: "Checkout started", severityNumber: 9, severityText: "INFO", weight: 15 },
+  { name: "app.payment.succeeded", body: "Payment succeeded", severityNumber: 9, severityText: "INFO", weight: 10 },
+  { name: "app.user.signed_up", body: "User signed up", severityNumber: 9, severityText: "INFO", weight: 7 },
+  { name: "app.payment.refunded", body: "Payment refunded", severityNumber: 13, severityText: "WARN", weight: 2 },
 ] as const;
 
-const sources = ["web", "mobile", "partner", "internal"] as const;
+const serviceNames = ["checkout-api", "catalog-api", "identity-api", "billing-worker"] as const;
+const deploymentEnvironments = ["local", "staging", "production"] as const;
+const clientPlatforms = ["web", "ios", "android", "partner-api"] as const;
 
 const app = new Hono();
 const byteToHex = Array.from({ length: 256 }, (_, index) => index.toString(16).padStart(2, "0"));
@@ -44,103 +71,147 @@ function randomChoice<T>(values: readonly T[]): T {
   return values[randomInt(0, values.length - 1)];
 }
 
-function occurredAt(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+function randomWeighted<T extends { weight: number }>(values: readonly T[]): T {
+  const totalWeight = values.reduce((sum, value) => sum + value.weight, 0);
+  let threshold = Math.random() * totalWeight;
+
+  for (const value of values) {
+    threshold -= value.weight;
+    if (threshold < 0) {
+      return value;
+    }
+  }
+
+  return values[values.length - 1];
 }
 
-function uuidV7(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  const timestamp = BigInt(Date.now());
-
-  bytes[0] = Number((timestamp >> 40n) & 0xffn);
-  bytes[1] = Number((timestamp >> 32n) & 0xffn);
-  bytes[2] = Number((timestamp >> 24n) & 0xffn);
-  bytes[3] = Number((timestamp >> 16n) & 0xffn);
-  bytes[4] = Number((timestamp >> 8n) & 0xffn);
-  bytes[5] = Number(timestamp & 0xffn);
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return (
-    byteToHex[bytes[0]] +
-    byteToHex[bytes[1]] +
-    byteToHex[bytes[2]] +
-    byteToHex[bytes[3]] +
-    "-" +
-    byteToHex[bytes[4]] +
-    byteToHex[bytes[5]] +
-    "-" +
-    byteToHex[bytes[6]] +
-    byteToHex[bytes[7]] +
-    "-" +
-    byteToHex[bytes[8]] +
-    byteToHex[bytes[9]] +
-    "-" +
-    byteToHex[bytes[10]] +
-    byteToHex[bytes[11]] +
-    byteToHex[bytes[12]] +
-    byteToHex[bytes[13]] +
-    byteToHex[bytes[14]] +
-    byteToHex[bytes[15]]
-  );
+function unixNanoNow(offsetMillis = 0): string {
+  return (BigInt(Date.now() + offsetMillis) * 1_000_000n + BigInt(randomInt(0, 999_999))).toString();
 }
 
-function generatePayload(eventType: (typeof eventTypes)[number]): Record<string, unknown> {
-  const common = {
-    app_version: `${randomInt(1, 4)}.${randomInt(0, 9)}.${randomInt(0, 9)}`,
-    experiment: randomChoice(["control", "checkout-redesign", "pricing-copy"]),
-    flags: {
-      beta_user: Math.random() > 0.75,
-      campaign_id: `cmp-${randomInt(100, 999)}`,
-    },
-  };
+function randomHex(byteLength: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return Array.from(bytes, (byte) => byteToHex[byte]).join("");
+}
 
-  switch (eventType) {
-    case "page_view":
-      return {
+function stringValue(value: string): AnyValue {
+  return { stringValue: value };
+}
+
+function intValue(value: number): AnyValue {
+  return { intValue: String(value) };
+}
+
+function doubleValue(value: number): AnyValue {
+  return { doubleValue: value };
+}
+
+function boolValue(value: boolean): AnyValue {
+  return { boolValue: value };
+}
+
+function keyValue(key: string, value: AnyValue): KeyValue {
+  return { key, value };
+}
+
+function eventAttributes(eventName: string): KeyValue[] {
+  const common = [
+    keyValue("session.id", stringValue(randomHex(16))),
+    keyValue("user.id", stringValue(`user-${randomInt(1, 5000)}`)),
+    keyValue("client.platform", stringValue(randomChoice(clientPlatforms))),
+    keyValue("app.version", stringValue(`${randomInt(1, 4)}.${randomInt(0, 9)}.${randomInt(0, 9)}`)),
+    keyValue("feature.flag.variant", stringValue(randomChoice(["control", "checkout-redesign", "pricing-copy"]))),
+    keyValue("campaign.id", stringValue(`cmp-${randomInt(100, 999)}`)),
+    keyValue("synthetic", boolValue(true)),
+  ];
+
+  switch (eventName) {
+    case "app.page.viewed":
+      return [
         ...common,
-        page: randomChoice(["/", "/pricing", "/docs", "/checkout"]),
-        referrer: randomChoice(["direct", "search", "newsletter", "partner"]),
-      };
-    case "purchase":
-      return {
+        keyValue("url.path", stringValue(randomChoice(["/", "/pricing", "/docs", "/checkout"]))),
+        keyValue("http.request.method", stringValue("GET")),
+        keyValue("http.response.status_code", intValue(randomChoice([200, 200, 200, 304, 404]))),
+        keyValue("referrer.type", stringValue(randomChoice(["direct", "search", "newsletter", "partner"]))),
+      ];
+    case "app.payment.succeeded":
+      return [
         ...common,
-        payment_method: randomChoice(["card", "ach", "wallet"]),
-        currency: "USD",
-        coupon_codes: Math.random() > 0.7 ? [`SAVE${randomInt(5, 30)}`] : [],
-      };
-    case "refund":
-      return {
+        keyValue("payment.method", stringValue(randomChoice(["card", "ach", "wallet"]))),
+        keyValue("payment.amount", doubleValue(Math.round((Math.random() * 499 + 1) * 100) / 100)),
+        keyValue("payment.currency", stringValue("USD")),
+        keyValue("cart.item_count", intValue(randomInt(1, 12))),
+      ];
+    case "app.payment.refunded":
+      return [
         ...common,
-        reason: randomChoice(["duplicate", "customer_request", "fraud_review"]),
-        refunded_items: randomInt(1, 3),
-      };
+        keyValue("payment.amount", doubleValue(Math.round((Math.random() * 249 + 1) * 100) / 100)),
+        keyValue("payment.currency", stringValue("USD")),
+        keyValue("refund.reason", stringValue(randomChoice(["duplicate", "customer_request", "fraud_review"]))),
+        keyValue("cart.item_count", intValue(randomInt(1, 3))),
+      ];
+    case "app.cart.item_added":
+      return [
+        ...common,
+        keyValue("cart.item_count", intValue(randomInt(1, 12))),
+        keyValue("product.sku", stringValue(`sku-${randomInt(10000, 99999)}`)),
+        keyValue("product.price", doubleValue(Math.round((Math.random() * 99 + 1) * 100) / 100)),
+      ];
+    case "app.checkout.started":
+      return [
+        ...common,
+        keyValue("cart.item_count", intValue(randomInt(1, 12))),
+        keyValue("checkout.step", stringValue(randomChoice(["shipping", "payment", "review"]))),
+        keyValue("server.latency_ms", intValue(randomInt(20, 900))),
+      ];
     default:
-      return {
+      return [
         ...common,
-        form_factor: randomChoice(["desktop", "tablet", "phone"]),
-        latency_ms: randomInt(20, 900),
-      };
+        keyValue("auth.provider", stringValue(randomChoice(["password", "github", "google", "saml"]))),
+        keyValue("signup.plan", stringValue(randomChoice(["free", "team", "enterprise"]))),
+      ];
   }
 }
 
-function generateEvent(): EventObject {
-  const eventType = randomChoice(eventTypes);
+function generateEvent(): OtelEvent {
+  const template = randomWeighted(eventTemplates);
+  const serviceName = randomChoice(serviceNames);
+  const timeUnixNano = unixNanoNow(-randomInt(0, 2_000));
 
   return {
-    event_id: uuidV7(),
-    event_type: eventType,
-    user_id: `user-${randomInt(1, 5000)}`,
-    session_id: uuidV7(),
-    occurred_at: occurredAt(),
-    amount: Math.round((Math.random() * 499 + 1) * 100) / 100,
-    quantity: randomInt(1, 12),
-    source: randomChoice(sources),
-    payload: generatePayload(eventType),
+    timeUnixNano,
+    observedTimeUnixNano: unixNanoNow(),
+    traceId: randomHex(16),
+    spanId: randomHex(8),
+    flags: 1,
+    severityNumber: template.severityNumber,
+    severityText: template.severityText,
+    body: stringValue(template.body),
+    resource: {
+      attributes: [
+        keyValue("service.name", stringValue(serviceName)),
+        keyValue("service.namespace", stringValue("clickhouse-dataflow")),
+        keyValue("service.instance.id", stringValue(`${serviceName}-${randomInt(1, 8)}`)),
+        keyValue("deployment.environment.name", stringValue(randomChoice(deploymentEnvironments))),
+        keyValue("telemetry.sdk.name", stringValue("opentelemetry")),
+        keyValue("telemetry.sdk.language", stringValue("bun")),
+        keyValue("telemetry.sdk.version", stringValue("synthetic")),
+      ],
+      droppedAttributesCount: 0,
+    },
+    instrumentationScope: {
+      name: "clickhouse-dataflow.synthetic-events",
+      version: "0.1.0",
+      attributes: [keyValue("generator.name", stringValue("api"))],
+      droppedAttributesCount: 0,
+    },
+    attributes: eventAttributes(template.name),
+    droppedAttributesCount: 0,
+    eventName: template.name,
   };
 }
 
-async function publishEvents(events: EventObject[]): Promise<string[]> {
+async function publishEvents(events: OtelEvent[]): Promise<string[]> {
   const response = await fetch(publishUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
